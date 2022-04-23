@@ -90,6 +90,10 @@ public class Authorization: Codable {
     private static func deserialize(from serialization: Data) throws -> AuthorizationRef {
         // Convert data into authorization external form
         let int8Array = serialization.map { CChar(bitPattern: $0) }
+		
+		assert(serialization.count == kAuthorizationExternalFormLength)
+		assert(serialization.count == 32)
+
         let bytes = (int8Array[0],  int8Array[1],  int8Array[2],  int8Array[3],
                      int8Array[4],  int8Array[5],  int8Array[6],  int8Array[7],
                      int8Array[8],  int8Array[9],  int8Array[10], int8Array[11],
@@ -102,7 +106,13 @@ public class Authorization: Codable {
         
         // Create the authorization
         return try AuthorizationError.throwIfFailure { authorization in
-            AuthorizationCreateFromExternalForm(&externalForm, &authorization)
+			NSLog("ASDASD before AuthorizationCreateFromExternalForm")
+            let ret = AuthorizationCreateFromExternalForm(&externalForm, &authorization)
+			NSLog("ASDASD after AuthorizationCreateFromExternalForm")
+			return ret
+			// If this ends up throwing .denied, check Console.app for logs from authd. It might log:
+			// > process: PID 16263 code requirement check failed (-67050)
+			// That's errSecCSReqFailed: code failed to satisfy specified code requirement(s)
         }
     }
     
@@ -128,6 +138,9 @@ public class Authorization: Codable {
         
         // Turn external form into a Data instance
         let bytes = externalForm.bytes
+
+		assert(kAuthorizationExternalFormLength == 32)
+
         let int8array = [bytes.0,  bytes.1,  bytes.2,  bytes.3,  bytes.4,  bytes.5,  bytes.6,  bytes.7,
                          bytes.8,  bytes.9,  bytes.10, bytes.11, bytes.12, bytes.13, bytes.14, bytes.15,
                          bytes.16, bytes.17, bytes.18, bytes.19, bytes.20, bytes.21, bytes.22, bytes.23,
@@ -288,4 +301,10 @@ public class Authorization: Codable {
         
         return infoDictionary
     }
+}
+
+extension Authorization: CustomStringConvertible {
+	public var description: String {
+		"Authorization(\(try! self.serialize().base64EncodedString())"
+	}
 }

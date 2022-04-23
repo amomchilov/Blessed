@@ -71,13 +71,63 @@ public struct LaunchdManager {
     /// - Throws: ``LaunchdError`` if unable to bless.
     public static func bless(label: String, authorization: Authorization) throws {
         var unmanagedError: Unmanaged<CFError>?
+		errno = 0
         let result = SMJobBless(kSMDomainSystemLaunchd,
                                 label as CFString,
                                 authorization.authorizationRef,
                                 &unmanagedError)
+		let newErrno = errno
         if let error = unmanagedError?.takeUnretainedValue() {
             defer { unmanagedError?.release() }
-            throw LaunchdError.fromError(originalError: error)
+
+			print("""
+			CFError:
+				domain: \((CFErrorGetDomain(error) as String?).map(String.init(describing:)) ?? "nil")
+				code: \(CFErrorGetCode(error))
+				description: \((CFErrorCopyDescription(error) as String?).map(String.init(describing:)) ?? "nil")
+				user info: \((CFErrorCopyUserInfo(error) as NSDictionary?)?.description ?? "nil")
+				newErrno: \(newErrno)
+			""")
+
+			/*
+			 Notes:
+				- SMJobBless doesn't care if the helper's product name and bundle ID don't match.
+					- It only cares that the label passed as an arg matches the product name
+				- SMJobBless doesn't seem to care about the hardened runtime or the app sandbox
+					- `AuthorizationCopyRights(Async)` is what fails, if called from a Sandboxed app.
+			 */
+
+			switch CFErrorGetCode(error) {
+			case kSMErrorJobPlistNotFound:
+				print("""
+				One of:
+					- HELPER: The __info_plist section was missing from the helper's mach-o file
+					- HELPER: The __launchd_plist section was missing from the helper's mach-o file
+					- HELPER: The __info_plist section was missing a value for SMAuthorizedClients
+					- HELPER: The __info_plist section had a value for SMAuthorizedClients, but it was not an array
+					- INSTALLER: The Info.plist was missing a value for SMPrivilegedExecutables
+					- INSTALLER: The Info.plist had a value for SMPrivilegedExecutables, but was not a dictionary
+				""")
+
+			case kSMErrorAuthorizationFailure:
+				print("""
+				One of:
+					- HELPER: The helper's SMAuthorizedClients was empty
+					- HELPER: The installing program didn't match against the security requirements in SMAuthorizedClients
+					- INSTALLER: The SMPrivilegedExecutables dictionary of the installing app was empty
+					- INSTALLER: The SMPrivilegedExecutables dictionary did not have a key whose name match the helper's bundle ID
+				""")
+
+			case kSMErrorInternalFailure:
+				print("""
+				One of:
+					- INSTALLER: The installer did not copy the helper into its Contents/Library/LaunchServices
+					- INSTALLER: The bless label did not match the helper's product name
+				""")
+
+			default:
+				throw LaunchdError.fromError(originalError: error)
+			}
         } else if !result {
             throw LaunchdError.blessFailure
         }
@@ -97,27 +147,85 @@ public struct LaunchdManager {
     ///   - message: Optional message shown to the user as part of the macOS authentication dialog.
     ///   - icon: Optional file path to an image file loadable by `NSImage` which will be shown to the user as part of the macOS authentication dialog.
     public static func authorizeAndBless(message: String? = nil, icon: URL? = nil) throws {
-        // Request authorization for blessing
-        var environment = Set<AuthorizationEnvironmentEntry>()
-        if let message = message {
-            environment.insert(.forPrompt(message: message))
-        }
-        if let icon = icon {
-            environment.insert(.forIcon(icon))
-        }
-        let options: Set<AuthorizationOption> = [.interactionAllowed, .extendRights]
-        let authorization = try Authorization()
-        _ = try authorization.requestRights([.blessPrivilegedHelper], environment: environment, options: options)
-        
+        let authorization = try promptUserForPermissionToBlessHelperTool(message: message, icon: icon)
+
         // Bless executable
         if let executables = Bundle.main.infoDictionary?["SMPrivilegedExecutables"] as? [String : String],
            executables.count == 1,
            let firstExecutable = executables.first?.key {
+
+            // TODO: Check that the executable actually exists, in `Contents/Library/LaunchServices`
             try bless(label: firstExecutable, authorization: authorization)
         } else {
             throw LaunchdError.invalidExecutablesDictionary
         }
     }
+
+    public static func promptUserForPermissionToBlessHelperTool(
+        message: String? = nil,
+        icon: URL? = nil
+    ) throws -> Authorization {
+        // Request authorization for blessing
+        let rights: Set<AuthorizationRight> = [AuthorizationRight.blessPrivilegedHelper]
+        var environment = Set<AuthorizationEnvironmentEntry>()
+        if let message = message {
+            environment.insert(AuthorizationEnvironmentEntry.forPrompt(message: message))
+        }
+        if let icon = icon {
+            environment.insert(AuthorizationEnvironmentEntry.forIcon(icon))
+        }
+        let options: Set<AuthorizationOption> = [.interactionAllowed, .extendRights]
+        let authorization = try Authorization()
+        _ = try authorization.requestRights(rights, environment: environment, options: options)
+
+        return authorization
+    }
+
+	public static func promptUserForPermissionToBlessHelperToolAsync(
+		message: String? = nil,
+		icon: URL? = nil,
+		callback: @escaping ((Result<Authorization, AuthorizationError>) -> Void)
+	) {
+		// Request authorization for blessing
+
+		// Q: Why does this work even if this set is empty?!
+		// A: Because if you don't request the right here, the `AuthorizationCopyRights` call won't need to open an
+		//    interactive prompt (because there's no rights that need to be authorized). Since the right wasn't
+		//    pre-authorized there, the `SMJobBless` call will be what ends up calling `AuthorizationCopyRights` and
+		//    presenting the prompt. However, it will be missing the prompt message/icon, because it doesn't take
+		//    those as inputs, unlike the way they're explicitly set here.
+		let rights: Set<AuthorizationRight> = [AuthorizationRight.blessPrivilegedHelper]
+		var environment = Set<AuthorizationEnvironmentEntry>()
+		if let message = message {
+			environment.insert(AuthorizationEnvironmentEntry.forPrompt(message: message))
+		}
+		if let icon = icon {
+			environment.insert(AuthorizationEnvironmentEntry.forIcon(icon))
+		}
+		let options: Set<AuthorizationOption> = [
+			.interactionAllowed,
+			.extendRights,
+			.preAuthorize,
+		]
+
+		let authorization: Authorization
+		do {
+			authorization = try Authorization()
+
+			// Results in Blessed.AuthorizationError.denied (errAuthorizationDenied) when attempting to call from a sandboxed app.
+			authorization.requestRightsAsync(rights, environment: environment, options: options) { result in
+				callback(result.map { _ in authorization })
+			}
+
+			return
+		} catch let error as AuthorizationError {
+			callback(.failure(error))
+			return
+		} catch {
+			fatalError()
+		}
+	}
+
     
     /// Enables a helper tool in the main app bundle’s `Contents/Library/LoginItems` directory.
     ///
@@ -148,9 +256,6 @@ public struct LaunchdManager {
 // Adds static properties for the rights in the ServiceManagement framework.
 public extension AuthorizationRight {
     /// Authorization right for blessing and installing a privileged helper tool.
-    ///
-    /// When using this to check or request rights, ``AuthorizationEnvironmentEntry/forPrompt(message:)`` and
-    /// ``AuthorizationEnvironmentEntry/forIcon(_:)`` can be specified as environment entries.
     static let blessPrivilegedHelper = AuthorizationRight(name: kSMRightBlessPrivilegedHelper)
    
     /// Authorization right for modifying system daemons.

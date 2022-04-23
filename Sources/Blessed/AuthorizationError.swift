@@ -73,6 +73,7 @@ public enum AuthorizationError: Error {
         if result == errSecSuccess, let value = value {
             return value
         } else {
+			print(SecCopyErrorMessageString(result, nil) as? String as Any)
             throw fromResult(result)
         }
     }
