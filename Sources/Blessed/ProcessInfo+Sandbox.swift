@@ -28,7 +28,7 @@ extension ProcessInfo {
             return false
         }
         
-        guard CFGetTypeID(entitlement) == CFBooleanGetTypeID(), let boolValue = (entitlement as? Bool) else {
+        guard let boolValue = entitlement as? Bool else {
             // The entitlement value must be a boolean value. If it's not, then it's presumbly not sandboxed.
             return false
         }
