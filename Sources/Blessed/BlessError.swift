@@ -38,7 +38,8 @@ public struct BlessError: Error {
             toolAssessor.infoPropertyListAuthorizedClients(type: .bundled), // 7 & 8 - bundled
             toolAssessor.infoPropertyListAuthorizedClients(type: .installed), // 7 & 8 - bundled
             toolAssessor.infoPropertyListBundleVersion(), // 9
-            appAssessor.infoPropertyList(bundledHelperToolLocation: toolAssessor.bundledLocation, label: label) // 10
+            appAssessor.infoPropertyList(bundledHelperToolLocation: toolAssessor.bundledLocation, label: label), // 10
+            appAssessor.isNotSandboxed(), // 11
         ]
     }
 }
@@ -527,5 +528,21 @@ fileprivate struct AppAssessor {
                 Error: \(result)
                 """)
         }
+    }
+
+    // 11
+    func isNotSandboxed() -> Assessment {
+        if ProcessInfo.processInfo.isSandboxed {
+            // XPC services are usually found in a path like ".../MyApp.app/Contents/XPCServices/Bar.xpc/Contents/MacOS/MyService"
+            let isXPCService = Bundle.main.executableURL?.deletingLastPathComponent().path.hasSuffix(".xpc/Contents/MacOS") ?? false
+            let programType = isXPCService ? "XPC service" : "App"
+
+            return .notSatisfied(explanation: """
+            This \(programType) is sandboxed, which will cause SMJobBless() to always get denied.
+            Helper tools can only be blessed from a non-sandboxed \(programType).
+            """)
+        }
+
+        return .satisfied
     }
 }
